@@ -1,0 +1,113 @@
+---
+title: "Homework Statistical Modelling and Inference - Seminar 4"
+author: "Eric Bataller"
+output: html_notebook
+---
+
+```{r}
+knitr::opts_chunk$set(message= FALSE, warning = FALSE) #Make warnings and messages appear in console rather than cell output
+```
+
+```{r}
+PATH= 'C:/Users/ericb/Desktop/Data Science/BSE_Data_Science_master/Statistical Modeling and Inference/Part 2 - Clustering, PCA, LDA/seminar4'
+library(tidyverse)  # data manipulation
+library(cluster) #clustering
+library(factoextra) # clustering algorithms & visualization
+library(gridExtra) # multiple plotting package coded on top of ggplot2
+library(mclust) # clustering with mixture model
+
+```
+
+The following is a real business dataset from a large e-commerce company. The company has a global and diverse infrastructure which causes many identical products to be classified differently. To conduct sound and insightful product analysis, the company needs to be able to accurately cluster similar products. The dataset has 93 features for 10,000 products and our objective is to cluster the products in coherent groups.
+
+```{r}
+library(readr)
+product_features <- read_csv(file.path(PATH,"product_features.csv"))
+df <- scale(product_features[,-1]) #Scale the data before using K means as the product features might have different scaling
+rownames(df) <- product_features$id
+
+```
+
+We start by hard clustering the data via R's built-in function K-means algorithm. We start by performing a 5-menas clustering and we plot it on its principal components using fviz_cluster function just to get a sense of the data. Notice how the 5 clusters are extreamly close and overlap on the vast majority of products in our plot (specially for green,red, yellow and pink cluster). Considering that we are in 93-dimensional space with 10000 points, is somehow expected that only using 2 principal components fail to report that much of a high importance (a measure on Explained Variance Ratio can be seen next to each axis title).
+
+```{r}
+k5 <- kmeans(df, centers = 5, nstart = 25)
+fviz_cluster(k5, data = df)
+```
+
+In order to choose the proper number of clusters we turn to the elbow method. We try to estimate the appropiate number of clusters by spotting the elbow in the 'total within clusters sum of squares vs K' curve (the point at which the curve flattens and an increase in k doesn't yield a great reduction in the 'total within clusters sum of squares').
+
+```{r}
+wss <- function(k) {
+  kmeans(df, k, nstart = 10)$tot.withinss
+}
+
+# Compute and plot wss for k = 1 to k = 30
+k.values <- 1:30
+
+# extract wss for 2-15 clusters
+wss_values <- map_dbl(k.values, wss)
+
+wss_df <- data.frame(k=k.values, wss= wss_values)
+ggplot(wss_df, aes(x=k,y=wss)) + 
+  geom_point() +
+  geom_line() +
+  xlab("Number of clusters K") +
+  ylab("Total within-clusters sum of squares")
+```
+
+By plotting the chart, we realise that there isn't a self-evident elbow. This raises the question whether or not there is an actual well-clustered structure underlying our data. There isn't a clear optimal amount of clusters by which our algorithm is able to reduce the total within-cluster sum of squares significantly, suggesting that the data doesn't resemble a well-separated clusteres form.
+
+We now aim to spot the optimal k with a little bit more of "statistical formality" by means of the gap statistic (Gap statistics measures how different the total within intra-cluster variation can be between observed data and reference data drawn from a random uniform distribution).
+
+```{r}
+# compute gap statistic
+gap_stat <- clusGap(df, FUN = kmeans, nstart = 25,
+                    K.max = 20, B = 25) 
+```
+
+```{r}
+# plot the gap 
+fviz_gap_stat(gap_stat)
+```
+
+```{r}
+# Print the result
+print(gap_stat, method = "firstmax")
+```
+
+By looking at the Gap statistic curve it's not obvious which k should be chosen as the optimal. According to Tibshirani (2001), to obtain an ideal clustering, you should select k such that you maximize the gap statistic. However, in many real-world datasets such as ours, the clusters are not as well-defined, and we want to be able to balance maximizing the gap statistic with parsimony of the model. If we're maximizing the gap statistic alone, then we should choose the model with 20 (or even more!) clusters. Assuming that that plot is just going to continue to increase, of course, the results are less useful, so Tibshirani suggests the 1-standard-error method. So the first k that satisfies the 1-standard-error criterion is 10. Same applies for "firstmax" method applied above which actually looks at the first local maxima. This raises the question whether our data should be clustered at all, since the gap statistic method assumes that the clusters are well separated, but it seems like it's not our case. 
+
+Following the same reasoning Tibshirani uses in his examples, we see that the gap function particularly rises also at 7, 10 and 17 clusters, suggesting that on those points we get some gain finding smaller well-separated subclasters within larger ones. It's important to examine the entire gap curve rathern than simply to find the position of its maximum.  
+
+Still, since the Gap statistic seems to be not very convincing. We now move to performing soft clustering via EM on a GMM, and hopefully it will yield more certainty and help us determine which amount of clusters make sense. We will use Mclust function, which fits different GMMs with different constraints on the Σk, such as: equal volume, equal shape, equal orientation, spherical (uncorrelated variables)… and different numbers of components. The function picks the best model (type of GMM and number of components) using the BIC criterion.
+
+```{r}
+mod <- Mclust(df,G=1:20)
+```
+
+```{r}
+summary(mod$BIC)
+```
+According to BIC criteria, our best choice for GMM seems to be VEV with k=14 clusters.
+We finally plot the BIC values for the different types of GMM as a function of the number of components/clusters:
+
+```{r}
+plot(mod, what = "BIC", ylim = range(mod$BIC[,-(1:2)], na.rm = TRUE),
+     legendArgs = list(x = "bottomleft"))
+```
+GMM is able to capture better the clustering as we also tied several configurations with different constraints, whereas K-means doesn't. In this sense, GMM is clearly more flexible.  
+
+We stick to  k= 14 as our optimal number of clusters, although we obtain similar BIC score for all k from 9 to 16, suggesting there isn't a one clear cluster structure. We finally instantiate a model with our hyperparameters set.   
+Our final model would be the following:
+
+```{r}
+mod_14_VEV <- Mclust(df, G=c(14), modelNames = c('VEV'))
+```
+
+
+
+
+
+
+

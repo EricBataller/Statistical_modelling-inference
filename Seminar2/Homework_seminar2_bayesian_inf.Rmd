@@ -1,0 +1,224 @@
+---
+title: "Homework Statistical Modelling and Inference - Seminar 2"
+author: "Eric Bataller"
+output: html_notebook
+---
+
+```{r}
+knitr::opts_chunk$set(message= FALSE, warning = FALSE) #Make warnings and messages appear in console rather than cell output
+```
+
+
+```{r}
+PATH= 'C:/Users/ericb/Desktop/Data Science/BSE_Data_Science_master/Statistical Modeling and Inference/Part 1 - Regression, Penalized likelihood, Bayesian regression, Non-parametric regression/StatInference_seminar2'
+library(bayestestR)
+library(rstanarm)
+library(ggplot2)
+library(tidyverse)
+library(mombf)
+library(glmnet)
+source(file.path(PATH,"routines_seminar1 (glm).R"))
+
+```
+
+Import the data:
+
+```{r}
+data_logx <- log(read_csv(file.path(PATH, "data/Vessel_X.txt"), col_names = FALSE))
+data_y <- read_csv(file.path(PATH, "data/Vessel_Y.txt"), col_names = FALSE)
+data_y <- data_y[,1]
+colnames(data_logx)<-sprintf("%s%i","F",seq(100,400,1))
+colnames(data_y)<-sprintf("%s%i","Y",seq(1,ncol(data_y)))
+data<-cbind(data_logx,data_y)
+```
+
+#Exaploratory data analysis
+
+Our objective is to determine which are the frequencies that get absorbed in the presence of sodium oxide. In order to identify the frequencies that make the best predictors of the sodium oxide concentration in the vessels, we have the concentration of Na20 from 180 different vessels, along with their measured absorption spectrum (absorption measured at 301 different frequencies - the covariates). Thus, we have n=180 observations, each of them of dimension p=301, and we aim to determine the real predictors.   
+
+A look at the mean frequency data shows us that predictors are highly correlated as they draw a smooth curve.
+```{r}
+df <- data.frame(frequency = seq(100,400,1), mean = colMeans(data_logx), variance = diag(cov(data_logx)))
+p1 <- ggplot(df)+geom_line(aes(y=mean,x=frequency)) + geom_vline(xintercept = c(102, 120, 144, 194, 228, 253, 319, 355,385),col="grey")
+p2 <- ggplot(df)+geom_line(aes(y=variance,x=frequency))+geom_vline(xintercept = c(102, 120, 144, 194, 228, 253, 319, 355,385),col="grey")
+```
+
+```{r}
+library(gridExtra)
+grid.arrange(p1, p2, ncol=2)
+```
+
+We will now plot the median response for the 15 vessels with the largest and lowest content in sodium oxide in order to have a sense of what frequencies are the good predictors for the sodium oxide concentration.
+
+```{r}
+low<-data %>% 
+  dplyr::arrange(Y1) %>% 
+  dplyr::slice(1:15) %>% 
+  dplyr::select(-Y1) %>% 
+  summarise_all(median)
+
+high<-data %>% 
+  dplyr::arrange(Y1) %>%
+  dplyr::slice((n()-15):n()) %>% 
+  dplyr::select(-Y1) %>% 
+  summarise_all(median)
+
+df<-data.frame(frecuencia = seq(100,400,1), bajo = as.numeric(low), alto = as.numeric(high))
+
+ggplot(df,aes(x=frecuencia)) + 
+  geom_line(aes(y=bajo,col="lowest")) + 
+  geom_line(aes(y=alto,col="largest")) +
+  ylab("Median") +
+  xlab("Frequency") +
+  labs(color="Content") +
+  theme(plot.title = element_text(size = 10, face = "bold"),
+        legend.position="bottom",
+        legend.title = element_text(size = 10)) +
+  geom_vline(xintercept = c(100, 120, 145, 194, 253, 319, 355, 385),col="grey")
+```
+
+#LASSO regression on the Vessels data
+
+Assuming a linear model y= b1x1+b2x2+...+gaussian_noise and finding parameters b by maximizing likelihood (equivalent to minimizing the sum of squares error - a.k.a OLS) will naturally yield to an over-fitted solution where we also model the noise and thus SSE will be 0. This is because there are potentially an infinite amount of ways to solve the system of 180 equations (constraints) and 301 parameters (the variables). We therefore aim to reduce the flexibility/complexity of the model by introducing a constraint/regularizer into the minimization problem that forces some parameters to 0. We decide to do so by penalizing the ℓ1 norm of the weights/parameters (LASSO method), which is equivalent to imposing a Laplacian prior.
+
+```{r}
+fit.lasso= cv.glmnet(x=as.matrix(data_logx), y=data_y$Y1, nfolds=10)
+fit.lasso
+```
+
+Out of the 301 frequency, the LASSO selects 31 of them.
+
+```{r}
+plot(fit.lasso)
+```
+
+```{r}
+b.lasso <- as.vector(coef(fit.lasso, s='lambda.min'))
+names(b.lasso) <- c('intercept',colnames(data_logx))
+b.lasso[b.lasso!=0]
+```
+
+We now get the cross validated R^2:
+
+```{r}
+lasso_cv.mle = kfoldCV.lasso(x=as.matrix(data_logx), y=data_y$Y1, K=10, seed=1)
+lasso_r2.mle= cor(lasso_cv.mle$pred, data_y$Y1)^2
+lasso_r2.mle
+```
+
+#1. Prior eliciation to choose g:
+
+Since we don't have any information on which variables go in and which ones go out (in other words, which parameters b are 0 and which aren't), we have to set a prior belief on each parameter that tells us how confident we are that they are 0 or not. Such prior will usually be centered around 0, and it will be more or less spread depending on how much sure we are that that variable the parameter is referring to has high or low explanatory power (highly spread = we believe the parameter b can be quite large = we believe it can have high explanatory power). Of course, if we have a huge amount of observations, then the prior will become irrelevant, but since that's not usually the case, the choosing of the prior can have a big impact on the solution we get with our limited data, depending on how much we believe a priori on the existence of large or small parameters, and thus on the explanatory power of the covariates (similarly to what we would do with Ridge). 
+
+The parameter that refers to that spreadness is g, and since we don't have any idea on which g is the proper one, we build different priors (making them more or less spread with different values of g) and, for each prior we sample different bi's and then for each sample bi compute Tau (the amount of variance in Y explained by X with that specific bi). Then report the average of those Taus (which give you an approximation of the expected Tau that you would get with that specific prior). Notice how, if g is very large that means that we believe X has very high predictive power and that will produce Tau's close to 1 (since that means that we allows for large parameters and probably overfitting). We then choose the g that produces an expected Tau reasonable within the context of the experiment.
+
+We set our grid of values for g:
+```{r}
+gseq= seq(.000005,.0001,length=50)
+gseq
+```
+
+```{r}
+library(mvtnorm)
+V= diag(ncol(data_logx)) #Covariance matrix of our multivariate normal prior is the identity matrix
+beta= rmvnorm(1000, sigma= V) #generates data from the multivariate normal distribution - get 1,000 prior simulations for vector beta.
+mat_data_logx = matrix(unlist(data_logx), nrow= nrow(data_logx), ncol= ncol(data_logx))
+sse= rowSums((mat_data_logx %*% t(beta))^2) / nrow(data_logx)
+```
+
+For each value of g, we obtain the prior mean of τ over the prior simulations:
+
+```{r}
+r2= double(length(gseq))
+for (i in 1:length(gseq)) {
+  r2[i]= mean(sse * gseq[i] / (1 + sse * gseq[i]))
+}
+```
+
+Plot the results:
+```{r}
+par(mar=c(5,5,1,1), cex.lab=1.3, cex.axis=1.3)
+plot(gseq, r2, type='l', xlab='g', ylab=expression(paste('Theoretical ',R^2)))
+```
+By pinning down the range of g that produces R^2 within the 0 and 1 range, we come to the conclusion that the values within the approximate interval [2e-05, 9e-05] make sense as they are restrictive enough so that it seems like they'd produce outcomes that won't excessively overfit, but they'll still keep relevant parameters maintaining plausible explanatory power. Considering that the LASSO method shown before obtained a CV-R^2 of around 0.98 even after reducing the amount of parameters to 31, and since we are more interested in understanding which frequencies really reflect the existence of Na2O content in the vessels, an example of plausible choice for g could be the one that a priori seems to generate a R^2 of around 0.75 (corresponding to a g value of around 6e-05). This makes the prior spread relatively small, pushing the parameters values towards 0, and making the final posterior distribution less centered towards the MLE.
+
+We have thus concluded our prior elicitation for g parameter in a Bayesian regression with a normal shrinkage prior. We now move to the next question that requires running Bayesian model selecion on our data. Unfortunately, posterior sampling with Normal Shrinkage prior is not yet implemented on the mombf package, so we will run it considering a Zellner's prior with g=taustd=1.
+
+#2. Run a Bayesian model selection
+
+We now run model selection setting g=1, Beta-Binomial(1,1) prior on the models (thus making all models equally likely in terms of the amount of parameters they contain) and Zellner's prior on the regression coefficients
+
+```{r}
+fit.bayesreg <- modelSelection(x=as.matrix(data_logx), y=data_y$Y1, priorCoef=zellnerprior(taustd=1), priorDelta=modelbbprior(1,1))
+```
+
+```{r}
+head(postProb(fit.bayesreg),10)#postProb outputs models posterior probilities p(γ|y) where the column modelid lists the variables included in each model
+```
+
+We see that according to BMS, the model with a greater Posterior probability p(γ|y) contains 8 parameters different than 0 (namely frequencies number 2,3,5,16,36,58,68,232). Notice though, that there are lots of other possible models explored (4423), and some of them have similar posterior probability compared to the 1st one. Further more, the most probable models don't change much in terms of the predictors they contain (frequencies 2,3,5,36,58, and 68 seem to appear quite recursively indicating they are likely to belong in). In order to be more precise about the probability of each variable to go in or out of the regressed model, we asses the marginal posterior inclusion probabilities P(γj=1∣y) (rather than p(γ|y)), we estimate the proportion of MCMC samples where γj=1.
+
+The next plot gives a sense of the convergence of the posterior inclusion probabilities of each parameter.
+
+```{r}
+margppest= matrix(NA,nrow=nrow(fit.bayesreg$postSample),ncol=ncol(fit.bayesreg$postSample))
+for (j in 1:ncol(fit.bayesreg$postSample)) {
+    margppest[,j]= cumsum(fit.bayesreg$postSample[,j])/(1:nrow(fit.bayesreg$postSample))
+}
+```
+
+```{r}
+
+par(mar=c(4,5,.1,.1), cex.lab=1, cex.axis=1)
+plot(margppest[,1], type='l', ylim=c(0,1), xlab='Gibbs iteration', ylab='Estimated P(gamma_j=1 | y)')
+for (j in 2:ncol(margppest)) lines(margppest[,j])
+```
+Since we are not sure which is the true model of the distribution, when it comes to estimating the parameters it's better to perform Bayesian model averaging so that we take into account the uncertainty that we have surrounding the true model vector γ (rather than taking the mode of P(γ|y) and use that value to look at the posterior P(beta,rho|y,γ)). With the method coef we extract Bayesian model averaging estimates for each coefficient, posterior intervals and posterior marginal inclusion probabilities (P(βj≠0|y)=P(γj=1|y)).
+
+```{r}
+ci.bayesreg <- coef(fit.bayesreg)[-c(1,nrow(coef(fit.bayesreg))),]
+ci.bayesreg[,1:3]= round(ci.bayesreg[,1:3], 3) #Round 1:3 columns to 3 decimals  
+ci.bayesreg[,4]= round(ci.bayesreg[,4], 4) #Round 4th column to 4 decimals
+intercept <- coef(fit.bayesreg)[1,]
+intercept[1:3]= round(intercept[1:3], 3) #Round 1:3 columns to 3 decimals  
+intercept[4]= round(intercept[4], 4) #Round 4th column to 4 decimals
+cat('\t estimate  2.5% 97.5% margpp \n','Intercept:',intercept, '\n \n')
+head(ci.bayesreg, 10)
+```
+
+Plot parameter estimates and confidence intervals 
+
+```{r}
+plot(NA, ylim=1.25*range(ci.bayesreg[,1:3]), xlim=c(0,nrow(ci.bayesreg)), ylab='95% CI', xlab='', main='Bayesian Model Selection')
+segments(y0 = ci.bayesreg[, 2], y1 = ci.bayesreg[, 3], x0 = 1:nrow(ci.bayesreg))
+points(1:nrow(ci.bayesreg), ci.bayesreg[, 1], pch = 16)
+```
+We decided to punish the convergence to large valued parameters by introducing our believe on how much explanatory power we think our covariates have via the prior (by packing most of the probability density around 0). We updated our prior belief with the data, and came up with an estimate of each parameter, along with the probability that it belongs into our regression model. It's now time to decide which parameters we are gonna keep and which ones are gonna get dumped. As always, it depends on how sure we wanna be that a parameter truly belongs to the model. A common criteria is to pick all those parameters whose posterior marginal inclusion probabilities are greater than 0.5, but of course, we can decide to lower that threshold in prone to increasing predictability power, potentially introducing more noise. For example, in our case, only 5 covariates have parameters that have probability >0.5 to be different than 0. BMA therefore punishes quite a lot the parameters and is very picky when it comes to letting a covariate into the model when we don't have much data (since our prior belief was quite strict).  
+
+```{r}
+sel.bayesreg <- ci.bayesreg[,4] > 0.5
+ci.bayesreg[sel.bayesreg,] #This returns frequencies 2,3,5,36, and 
+
+cat('\n Final parameters:\n')
+b.BMA <- as.vector(c(intercept[1],ci.bayesreg[sel.bayesreg,][,1]))
+names(b.BMA) <- c('intercept', rownames(ci.bayesreg[sel.bayesreg,]))
+b.BMA
+```
+
+#4. Obtain predictions by Bayesian Model Averaging
+
+We know repeat the BMA in order to generate predictions on out-of-sample data via Kfolds cross validation. In order to do that, we have edited the "kfoldCV.lasso" function so that the user can specify criterion='bayes' and then the function will perform KfoldCV using BMA (mind that KfolfCV.lasso function won't be using the Lasso method in that case, we aplogy for the bad naming). Also, notice that in this case we are not doing any variable selection via a threshold on the posterior marginal inclusion probabilities, but we will rather take all the parameters as estimated by the BMA. 
+
+```{r}
+BMA = kfoldCV.lasso(x=as.matrix(data_logx), y=data_y$Y1, K=10, seed=1, criterion='bayes')
+BMA_r2= cor(BMA$pred, data_y$Y1)^2
+BMA_r2
+```
+
+```{r}
+cat('Kfolds BMA R^2:', BMA_r2)
+```
+
+#5. Compare to the results obtained with LASSO
+
+We finally asses the comparison between the LASSO method ran at the beginning of the project and the BMA. Clearly, BMS is more conservative than LASSO in terms of model selection, it results in more coefficients very close to 0, and therefore the marginal posterior probability of inclusion is tipically low, unless the covariate has very high explanatory power, bringing huge evicence with the data and countering the prior belief. As a result, Bayesian Model Averaging (BMA) that relies on BMS weights may predict worse than LASSO. On the other hand LASSO is often worse at detecting the variables that truly matter (i.e. for explanatory purposes) than BMS. Of course, the change in spread on the prior distributions of the parameters on both BMA and LASSO will change how close both solutions are to MLE. For example, in our case, we imposed a very restrictive prior setting the hyperparameter g=1, as it yield a R^2 of only 0.37. Nonetheless, the LASSO prior (Laplacian) usually tends to push less coefficients to 0.   
